@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>Star-based Navigation — Alt/Az</title>
+<style>
+  :root { font-family: -apple-system, "Segoe UI", Roboto, Arial; color:#222; }
+  body { max-width:1100px; margin:26px auto; padding:12px; }
+  h1 { font-size:1.8rem; margin-bottom:0.2rem; }
+  .note { color:#666; margin-bottom:0.8rem; }
+  .grid { display:grid; grid-template-columns: 1fr 1fr; gap:12px; align-items:end; margin-bottom:12px; }
+  label { font-weight:700; font-size:0.95rem; margin-bottom:6px; display:block; }
+  input[type="number"], input[type="datetime-local"], select { width:100%; padding:8px; box-sizing:border-box; border:1px solid #bbb; border-radius:3px; }
+  button { padding:10px 16px; background:#eee; border:1px solid #ccc; cursor:pointer; font-weight:700; }
+  table { width:100%; border-collapse:collapse; margin-top:14px; }
+  th, td { padding:10px 8px; border:1px solid #ddd; text-align:left; }
+  th { background:#fafafa; font-weight:700; }
+  .muted { color:#666; font-size:0.9rem; margin-top:8px; }
+  .controls { display:flex; gap:10px; align-items:center; }
+  @media (max-width:720px) { .grid { grid-template-columns: 1fr; } .controls { flex-direction:column; align-items:stretch; } }
+</style>
+</head>
+<body>
+  <h1>Star-based Navigation — Alt/Az</h1>
+  <div class="note">Input: latitude φ, longitude λ, time. The datetime input shows local time but calculations use UTC. Output: Hour Angle, Altitude (h) and Azimuth (A) for selected bright stars.</div>
+
+  <div class="grid">
+    <div>
+      <label>Latitude φ (degrees, +North / -South)</label>
+      <input id="lat" type="number" step="0.0001" value="41.085" />
+    </div>
+    <div>
+      <label>Longitude λ (degrees, +East / -West)</label>
+      <input id="lon" type="number" step="0.0001" value="29.045" />
+    </div>
+
+    <div style="grid-column:1 / span 2;">
+      <label>Date & Time (local shown; calculations use UTC)</label>
+      <input id="datetime" type="datetime-local" value="" />
+    </div>
+
+    <div style="grid-column:1 / span 2;">
+      <div class="controls">
+        <button id="calc">Calculate</button>
+        <label style="font-weight:600; margin:0 6px 0 12px;"><input id="refract" type="checkbox" /> Apply atmospheric refraction</label>
+        <select id="starSelect" style="margin-left:auto; max-width:320px;">
+          <option value="all">All sample bright stars</option>
+          <option value="bright">Only top 5 brightest</option>
+        </select>
+      </div>
+      <div class="muted">Note: the browser shows the datetime-local in local time; the code treats the input as an absolute instant and uses UTC values for astronomical calculations.</div>
+    </div>
+  </div>
+
+  <table id="results">
+    <thead>
+      <tr>
+        <th>Star</th>
+        <th>RA α (hours)</th>
+        <th>Dec δ (°)</th>
+        <th>Hour Angle H (°)</th>
+        <th>Altitude h (°)</th>
+        <th>Azimuth A (°)</th>
+      </tr>
+    </thead>
+    <tbody></tbody>
+  </table>
+
+  <div class="muted">
+    Model: JD → GMST (Meeus) → LST → H = LST − α → Alt/Az. Simplifications: no precession, nutation, proper motion or parallax. Bennett refraction is optional.
+  </div>
+
+<script>
+// Sample bright star list (RA in hours, Dec in degrees)
+const starsFull = [
+  { name: "Sirius (α CMa)", ra: 6.752477, dec: -16.716116 },
+  { name: "Canopus (α Car)", ra: 6.399203, dec: -52.695661 },
+  { name: "Rigil Kentaurus (α Cen)", ra: 14.660139, dec: -60.833992 },
+  { name: "Arcturus (α Boo)", ra: 14.261020, dec: 19.182410 },
+  { name: "Vega (α Lyr)", ra: 18.615649, dec: 38.783689 },
+  { name: "Capella (α Aur)", ra: 5.278155, dec: 45.998028 },
+  { name: "Rigel (β Ori)", ra: 5.242298, dec: -8.201640 },
+  { name: "Procyon (α CMi)", ra: 7.655033, dec: 5.225000 },
+  { name: "Betelgeuse (α Ori)", ra: 5.919529, dec: 7.407064 },
+  { name: "Polaris (α UMi)", ra: 2.530301, dec: 89.264109 }
+];
+
+// Utility functions
+function toRad(d){return d*Math.PI/180;}
+function toDeg(r){return r*180/Math.PI;}
+function normDeg(a){ a = a % 360; if (a<0) a += 360; return a; }
+function normHours(h){ h = h % 24; if (h<0) h += 24; return h; }
+
+// Julian Date from a JS Date (using UTC getters)
+function julianDate(date) {
+  let Y = date.getUTCFullYear();
+  let M = date.getUTCMonth() + 1;
+  let D = date.getUTCDate() + date.getUTCHours()/24 + date.getUTCMinutes()/1440 + date.getUTCSeconds()/86400 + date.getUTCMilliseconds()/86400000;
+  if (M <= 2) { Y -= 1; M += 12; }
+  const A = Math.floor(Y/100);
+  const B = 2 - A + Math.floor(A/4);
+  const JD = Math.floor(365.25*(Y+4716)) + Math.floor(30.6001*(M+1)) + D + B - 1524.5;
+  return JD;
+}
+
+// GMST in hours using Meeus formula
+function gmstFromJD(JD) {
+  const T = (JD - 2451545.0)/36525.0;
+  let GMSTdeg = 280.46061837 + 360.98564736629*(JD - 2451545.0) + 0.000387933*T*T - (T*T*T)/38710000.0;
+  GMSTdeg = normDeg(GMSTdeg);
+  return GMSTdeg / 15.0;
+}
+
+// Bennett refraction approximation (returns degrees)
+function bennettRefraction(h_deg) {
+  const h = h_deg;
+  if (h <= -2) return 0;
+  const R_arcmin = 1.02 / Math.tan( toRad(h + 10.3/(h + 5.11)) );
+  return R_arcmin / 60.0;
+}
+
+// Compute altitude and azimuth for a given star
+function computeAltAz(latDeg, lonDeg, dateUTC, star, applyRefraction=false) {
+  const JD = julianDate(dateUTC);
+  const gmst = gmstFromJD(JD); // hours
+  let lst = gmst + lonDeg/15.0; // local sidereal time in hours
+  lst = normHours(lst);
+
+  // Hour angle in hours, normalize to -12..12
+  let Hh = lst - star.ra;
+  if (Hh > 12) Hh -= 24;
+  if (Hh < -12) Hh += 24;
+  const Hdeg = Hh * 15.0;
+
+  const phi = toRad(latDeg);
+  const delta = toRad(star.dec);
+  const H = toRad(Hdeg);
+
+  // Altitude
+  const sin_h = Math.sin(phi)*Math.sin(delta) + Math.cos(phi)*Math.cos(delta)*Math.cos(H);
+  let h = Math.asin(sin_h);
+  let h_deg = toDeg(h);
+
+  // Azimuth from North toward East (0..360)
+  let A = Math.atan2(Math.sin(H), Math.cos(H)*Math.sin(phi) - Math.tan(delta)*Math.cos(phi));
+  let A_deg = normDeg(toDeg(A));
+
+  if (applyRefraction) {
+    const R = bennettRefraction(h_deg);
+    h_deg += R;
+    // Azimuth change due to refraction is negligible for this purpose.
+  }
+
+  return { lst_hours: lst, H_deg: Hdeg, alt_deg: h_deg, az_deg: A_deg };
+}
+
+function format(x, d=3) { return (isFinite(x) ? x.toFixed(d) : ""); }
+
+function updateTable() {
+  const lat = parseFloat(document.getElementById('lat').value);
+  const lon = parseFloat(document.getElementById('lon').value);
+  const dtInput = document.getElementById('datetime').value;
+  const tbody = document.querySelector('#results tbody');
+  tbody.innerHTML = "";
+
+  if (!dtInput) {
+    tbody.innerHTML = '<tr><td colspan="6" style="color:#666">Please select a date & time and click Calculate.</td></tr>';
+    return;
+  }
+
+  // datetime-local provides a local time string such as "2025-12-20T14:05"
+  const localDate = new Date(dtInput);
+  // Use the JS Date (it represents an absolute instant); further functions use UTC getters
+  const dateUTC = new Date(localDate.getTime());
+
+  const applyRef = document.getElementById('refract').checked;
+  const sel = document.getElementById('starSelect').value;
+  const list = (sel === 'bright') ? starsFull.slice(0,5) : starsFull;
+
+  for (const s of list) {
+    const r = computeAltAz(lat, lon, dateUTC, s, applyRef);
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td>${s.name}</td>
+      <td>${format(s.ra,4)}</td>
+      <td>${format(s.dec,4)}</td>
+      <td>${format(r.H_deg,3)}</td>
+      <td>${format(r.alt_deg,3)}</td>
+      <td>${format(r.az_deg,3)}</td>
+    `;
+    tbody.appendChild(tr);
+  }
+}
+
+// Initialize the datetime-local input with current local time (rounded to minutes)
+(function init() {
+  const now = new Date();
+  now.setSeconds(0); now.setMilliseconds(0);
+  const tzOffset = now.getTimezoneOffset() * 60000;
+  const localISO = new Date(now.getTime() - tzOffset).toISOString().slice(0,16);
+  document.getElementById('datetime').value = localISO;
+})();
+
+document.getElementById('calc').addEventListener('click', updateTable);
+document.getElementById('datetime').addEventListener('keydown', (e)=>{ if (e.key==='Enter') updateTable(); });
+</script>
+</body>
+</html>
